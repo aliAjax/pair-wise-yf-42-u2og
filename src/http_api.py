@@ -85,6 +85,23 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "sync"] and parsed.query:
+                    query = parse_qs(parsed.query)
+                    sync_key = query.get("sync_key", [None])[0]
+                    if sync_key:
+                        return self._send(200, service.sync_status(sync_key))
+                if len(parts) == 3 and parts[0] == "api" and parts[1] == "sync":
+                    return self._send(200, service.sync_status(parts[2]))
+                if len(parts) == 3 and parts[:2] == ["api", "source-refs"]:
+                    return self._send(
+                        200, {"items": service.source_refs(parts[2])}
+                    )
+                if parts == ["api", "source-refs"]:
+                    return self._send(200, {"items": service.source_refs()})
+                if len(parts) == 4 and parts[:2] == ["api", "pairing-slots"]:
+                    return self._send(
+                        200, service.pairing_slot(parts[2], parts[3])
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -107,6 +124,24 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "sync"]:
+                    body = self._body()
+                    sync_key = body.get("sync_key")
+                    if not sync_key:
+                        raise ValidationError("sync_key is required")
+                    source_system = body.get("source_system")
+                    if not source_system:
+                        raise ValidationError("source_system is required")
+                    return self._send(
+                        200,
+                        service.import_sync_batch(
+                            actor,
+                            str(sync_key),
+                            str(source_system),
+                            animals=body.get("animals", []),
+                            pairings=body.get("pairings", []),
+                        ),
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)
