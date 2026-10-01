@@ -36,21 +36,72 @@ def _validate_pairing(actor, entity, data, lookup):
         raise ValidationError("pairing animals must be active")
     if inbreeding_coefficient(sire["data"], dam["data"]) > 0.125:
         raise ValidationError("pairing exceeds inbreeding threshold")
-    return {"approved_by": actor.user_id}
+    return {"approved_by": actor.user_id, "approval_invalidated": False}
+
+
+def _validate_invalidate_approval(actor, entity, data, lookup):
+    return {"approval_invalidated": True}
+
+
+def _parent_data(lookup, parent_id):
+    if not parent_id:
+        return None
+    rows = lookup("animal", "id", parent_id) or []
+    return rows[0]["data"] if rows else None
+
+
+def _validate_parents_update(actor, entity, data, lookup):
+    animal_id = entity["id"]
+    sire_id = data.get("sire_id")
+    dam_id = data.get("dam_id")
+    if not sire_id and not dam_id:
+        raise ValidationError("at least one of sire_id or dam_id is required")
+    patch = {}
+    sire = None
+    dam = None
+    if sire_id:
+        sire = _find_one(lookup, "animal", "id", sire_id)
+        if not sire:
+            raise ValidationError("sire not found: " + str(sire_id))
+        if sire["id"] == animal_id:
+            raise ValidationError("animal cannot be its own sire")
+        if sire["status"] != "active":
+            raise ValidationError("sire must be active")
+        sire_data = sire["data"]
+        if sire_data.get("sire_id") == animal_id or sire_data.get("dam_id") == animal_id:
+            raise ValidationError("lineal inbreeding: animal is an ancestor of its sire")
+        patch["sire_id"] = sire_id
+    if dam_id:
+        dam = _find_one(lookup, "animal", "id", dam_id)
+        if not dam:
+            raise ValidationError("dam not found: " + str(dam_id))
+        if dam["id"] == animal_id:
+            raise ValidationError("animal cannot be its own dam")
+        if dam["status"] != "active":
+            raise ValidationError("dam must be active")
+        dam_data = dam["data"]
+        if dam_data.get("sire_id") == animal_id or dam_data.get("dam_id") == animal_id:
+            raise ValidationError("lineal inbreeding: animal is an ancestor of its dam")
+        patch["dam_id"] = dam_id
+    eff_sire = sire["data"] if sire_id else _parent_data(lookup, entity["data"].get("sire_id"))
+    eff_dam = dam["data"] if dam_id else _parent_data(lookup, entity["data"].get("dam_id"))
+    if eff_sire and eff_dam and inbreeding_coefficient(eff_sire, eff_dam) > 0.125:
+        raise ValidationError("parent update exceeds inbreeding threshold")
+    return patch
 
 
 CUSTOM_CREATE = {'animal': _validate_animal}
-CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing}
+CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing, ('pairing', 'invalidate_approval'): _validate_invalidate_approval, ('animal', 'update_parents'): _validate_parents_update}
 
 
 class RuleEngine:
     ALIASES = {'animals': 'animal', 'pairings': 'pairing', 'transfers': 'transfer'}
     INITIAL_STATUS = {'animal': 'active', 'pairing': 'proposed', 'transfer': 'planned'}
-    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active')}, 'pairing': {'approve': (('proposed',), 'approved'), 'reject': (('proposed',), 'rejected'), 'complete': (('approved',), 'completed')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
+    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active'), 'update_parents': (('active',), 'active')}, 'pairing': {'approve': (('proposed',), 'approved'), 'reject': (('proposed',), 'rejected'), 'complete': (('approved',), 'completed'), 'invalidate_approval': (('approved',), 'proposed')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
     CREATE_REQUIRED = {'animal': ('name', 'sex'), 'pairing': ('proposed_by',), 'transfer': ('animal_id', 'from_institution', 'to_institution')}
     ACTION_REQUIRED = {('animal', 'mark_deceased'): ('cause',), ('animal', 'quarantine_animal'): ('reason',), ('pairing', 'approve'): ('sire_id', 'dam_id', 'approvals'), ('pairing', 'reject'): ('reason',), ('pairing', 'complete'): ('offspring_ids',), ('transfer', 'authorize'): ('permit_id',), ('transfer', 'ship'): ('transport_id',), ('transfer', 'arrive'): ('arrival_date',)}
     CREATE_ROLES = {'animal': ('admin', 'registrar'), 'pairing': ('admin', 'coordinator'), 'transfer': ('admin', 'registrar')}
-    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'approve': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
+    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'update_parents': ('admin', 'registrar', 'coordinator'), 'invalidate_approval': ('admin', 'coordinator', 'registrar'), 'approve': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)

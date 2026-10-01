@@ -85,6 +85,11 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if len(parts) == 3 and parts[:2] == ["api", "sync"]:
+                    result = service.get_sync_batch(parts[2])
+                    if result is None:
+                        raise NotFoundError("sync batch not found: " + parts[2])
+                    return self._send(200, result)
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -137,6 +142,13 @@ def create_handler(service, rules, static_dir):
                     return self._send(
                         200,
                         service.transition(actor, parts[2], parts[3], self._body(), None),
+                    )
+                if len(parts) == 2 and parts[0] == "api" and parts[1] == "sync":
+                    body = self._body()
+                    batch_id = body.pop("batch_id", None) or self.headers.get("Idempotency-Key")
+                    return self._send(
+                        200,
+                        service.sync_import(actor, body, batch_id),
                     )
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()

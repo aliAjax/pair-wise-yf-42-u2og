@@ -54,6 +54,27 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS animal_sources (
+                    source_key TEXT PRIMARY KEY,
+                    entity_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pairing_sources (
+                    source_key TEXT PRIMARY KEY,
+                    entity_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pairing_keys (
+                    pairing_key TEXT PRIMARY KEY,
+                    entity_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sync_batches (
+                    batch_key TEXT PRIMARY KEY,
+                    actor_id TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
 
     @staticmethod
@@ -194,6 +215,140 @@ class SQLiteRepository:
                 "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
+            )
+
+    def find_animal_by_source(self, source_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT entity_id FROM animal_sources WHERE source_key = ?",
+                (str(source_key),),
+            ).fetchone()
+        return self.get_entity(row["entity_id"]) if row else None
+
+    def create_animal_if_absent(self, source_key, entity_id, data, actor_id):
+        """Atomically bind a source id to an animal, creating it on first sight.
+
+        Returns (entity, created). A duplicate source key resolves to the
+        already-bound entity so a retry never creates a second animal.
+        """
+        now = utcnow()
+        payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT entity_id FROM animal_sources WHERE source_key = ?",
+                (str(source_key),),
+            ).fetchone()
+            if row:
+                connection.commit()
+                return self.get_entity(row["entity_id"]), False
+            connection.execute(
+                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                "VALUES (?, 'animal', 'active', 1, ?, ?, ?, ?)",
+                (entity_id, payload, actor_id, now, now),
+            )
+            connection.execute(
+                "INSERT INTO animal_sources(source_key, entity_id, created_at) VALUES (?, ?, ?)",
+                (str(source_key), entity_id, now),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_entity(entity_id), True
+
+    def find_pairing_by_source(self, source_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT entity_id FROM pairing_sources WHERE source_key = ?",
+                (str(source_key),),
+            ).fetchone()
+        return self.get_entity(row["entity_id"]) if row else None
+
+    def find_pairing_by_key(self, pairing_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT entity_id FROM pairing_keys WHERE pairing_key = ?",
+                (str(pairing_key),),
+            ).fetchone()
+        return self.get_entity(row["entity_id"]) if row else None
+
+    def create_pairing_if_absent(self, source_key, pairing_key, entity_id, data, actor_id):
+        """Atomically create a pairing on first sight of its source id or pair key.
+
+        Returns (entity, created). A matching pair key (same sire, dam and
+        cycle) or source id resolves to the existing pairing so both zoos
+        submitting the same pairing only ever produce one effective record.
+        """
+        now = utcnow()
+        payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT entity_id FROM pairing_keys WHERE pairing_key = ?",
+                (str(pairing_key),),
+            ).fetchone()
+            if not row:
+                row = connection.execute(
+                    "SELECT entity_id FROM pairing_sources WHERE source_key = ?",
+                    (str(source_key),),
+                ).fetchone()
+            if row:
+                connection.commit()
+                return self.get_entity(row["entity_id"]), False
+            connection.execute(
+                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                "VALUES (?, 'pairing', 'proposed', 1, ?, ?, ?, ?)",
+                (entity_id, payload, actor_id, now, now),
+            )
+            connection.execute(
+                "INSERT INTO pairing_sources(source_key, entity_id, created_at) VALUES (?, ?, ?)",
+                (str(source_key), entity_id, now),
+            )
+            connection.execute(
+                "INSERT INTO pairing_keys(pairing_key, entity_id, created_at) VALUES (?, ?, ?)",
+                (str(pairing_key), entity_id, now),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_entity(entity_id), True
+
+    def bind_pairing_source(self, source_key, entity_id):
+        """Record an alias source id for a pairing; returns the bound entity id."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO pairing_sources(source_key, entity_id, created_at) "
+                "VALUES (?, ?, ?)",
+                (str(source_key), entity_id, utcnow()),
+            )
+            row = connection.execute(
+                "SELECT entity_id FROM pairing_sources WHERE source_key = ?",
+                (str(source_key),),
+            ).fetchone()
+        return row["entity_id"] if row else entity_id
+
+    def get_sync_batch(self, batch_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result FROM sync_batches WHERE batch_key = ?",
+                (str(batch_key),),
+            ).fetchone()
+        return json.loads(row["result"]) if row else None
+
+    def save_sync_batch(self, batch_key, actor_id, result):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO sync_batches(batch_key, actor_id, result, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (str(batch_key), actor_id, json.dumps(result, ensure_ascii=False, sort_keys=True), utcnow()),
             )
 
     def ping(self):
